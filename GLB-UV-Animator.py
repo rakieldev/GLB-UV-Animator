@@ -18,117 +18,124 @@ except ImportError:
     sys.exit(1)
 
 # --- Core Logic ---
+data = []
 
-def process_gltf(input_file, output_file, node_name, speed, x_dir, y_dir):
+def process_gltf(input_file, output_file):
     try:
         gltf = GLTF.load(input_file)
         
-        # Validation
-        if speed == 0:
-            return False, "Speed cannot be zero."
-
-        duration = 1.0 / abs(speed)
-        dir_x = x_dir * (1 if speed > 0 else -1)
-        dir_y = y_dir * (1 if speed > 0 else -1)
-
-        # Find Node
-        target_node_index = -1
-        for i, node in enumerate(gltf.model.nodes):
-            if node.name and node.name.strip().lower() == node_name.strip().lower():
-                target_node_index = i
-                break
-        
-        if target_node_index == -1:
-            return False, f"Node '{node_name}' not found."
-
-        target_node = gltf.model.nodes[target_node_index]
-        if target_node.mesh is None:
-            return False, "Selected node has no mesh."
-
-        target_node.weights = [0.0, 0.0]
-
-        # Prepare Morph Targets
-        mesh = gltf.model.meshes[target_node.mesh]
-        primitive = mesh.primitives[0]
-        
-        uv_accessor = gltf.model.accessors[primitive.attributes.TEXCOORD_0]
-        count = uv_accessor.count
-        buffer_idx = 0 
-
-        if not gltf.model.buffers:
-            return False, "Model has no buffers."
-        
-        offset = gltf.model.buffers[buffer_idx].byteLength
-        
-        # Binary Injection
-        blob = struct.pack("".join(['f' for _ in range(count*2+1)]),*[t%2 for t in range(count*2+1)])
-        gltf.resources[buffer_idx].data += blob
-        gltf.model.buffers[buffer_idx].byteLength += len(blob)
-
-        # Buffer Views & Accessors
-        new_views_start = len(gltf.model.bufferViews)
-        gltf.model.bufferViews.extend([
-            BufferView(buffer=0, byteOffset=offset + t*4, byteLength=4*count*2, target=BufferTarget.ARRAY_BUFFER.value) 
-            for t in range(2)
-        ])
-
-        new_accessors_start = len(gltf.model.accessors)
-        gltf.model.accessors.extend([
-            Accessor(
-                bufferView=new_views_start + t, 
-                componentType=ComponentType.FLOAT.value, 
-                count=count, 
-                type='VEC2', 
-                max=[0.0 + t%2, 1.0 - t%2], 
-                min=[0.0 + t%2, 1.0 - t%2]
-            ) for t in range(2)
-        ])
-
-        primitive.targets = [Attributes(TEXCOORD_0=new_accessors_start + t) for t in range(2)]
-        mesh.weights = [0.0, 0.0]
-
-        # Animation Data
-        anim_times = [0.0, duration]
-        anim_weights = [0.0, 0.0, dir_y, dir_x]
-
-        offset_time = gltf.model.buffers[buffer_idx].byteLength
-        time_blob = struct.pack(f"{len(anim_times)}f", *anim_times)
-        gltf.resources[buffer_idx].data += time_blob
-        gltf.model.buffers[buffer_idx].byteLength += len(time_blob)
-
-        offset_weights = gltf.model.buffers[buffer_idx].byteLength
-        weights_blob = struct.pack(f"{len(anim_weights)}f", *anim_weights)
-        gltf.resources[buffer_idx].data += weights_blob
-        gltf.model.buffers[buffer_idx].byteLength += len(weights_blob)
-
-        bv_time_idx = len(gltf.model.bufferViews)
-        gltf.model.bufferViews.append(BufferView(buffer=0, byteOffset=offset_time, byteLength=len(time_blob)))
-        
-        bv_weights_idx = len(gltf.model.bufferViews)
-        gltf.model.bufferViews.append(BufferView(buffer=0, byteOffset=offset_weights, byteLength=len(weights_blob)))
-
-        acc_time_idx = len(gltf.model.accessors)
-        gltf.model.accessors.append(Accessor(
-            bufferView=bv_time_idx, componentType=ComponentType.FLOAT.value, count=len(anim_times), 
-            type='SCALAR', max=[max(anim_times)], min=[0]
-        ))
-
-        acc_weights_idx = len(gltf.model.accessors)
-        gltf.model.accessors.append(Accessor(
-            bufferView=bv_weights_idx, componentType=ComponentType.FLOAT.value, count=len(anim_weights), 
-            type='SCALAR', max=[max(anim_weights)], min=[min(anim_weights)]
-        ))
-
-        if gltf.model.animations is None:
-            gltf.model.animations = []
-        
-        gltf.model.animations.append(
-            Animation(
-                name='UV_Speed_Anim',
-                channels=[Channel(sampler=0, target=Target(node=target_node_index, path='weights'))],
-                samplers=[AnimationSampler(input=acc_time_idx, output=acc_weights_idx, interpolation='LINEAR')]
+        for x in data:
+            node_name = x[0]
+            speed = x[1]
+            x_dir = x[2]
+            y_dir = x[3]
+            
+            # Validation (should never happen, but just in case)
+            if speed == 0:
+                return False, "Speed cannot be zero."
+    
+            duration = 1.0 / abs(speed)
+            dir_x = x_dir * (1 if speed > 0 else -1)
+            dir_y = y_dir * (1 if speed > 0 else -1)
+    
+            # Find Node
+            target_node_index = -1
+            for i, node in enumerate(gltf.model.nodes):
+                if node.name and node.name.strip().lower() == node_name.strip().lower():
+                    target_node_index = i
+                    break
+            
+            if target_node_index == -1:
+                return False, f"Node '{node_name}' not found."
+    
+            target_node = gltf.model.nodes[target_node_index]
+            if target_node.mesh is None:
+                return False, "Selected node has no mesh."
+    
+            target_node.weights = [0.0, 0.0]
+    
+            # Prepare Morph Targets
+            mesh = gltf.model.meshes[target_node.mesh]
+            primitive = mesh.primitives[0]
+            
+            uv_accessor = gltf.model.accessors[primitive.attributes.TEXCOORD_0]
+            count = uv_accessor.count
+            buffer_idx = 0 
+    
+            if not gltf.model.buffers:
+                return False, "Model has no buffers."
+            
+            offset = gltf.model.buffers[buffer_idx].byteLength
+            
+            # Binary Injection
+            blob = struct.pack("".join(['f' for _ in range(count*2+1)]),*[t%2 for t in range(count*2+1)])
+            gltf.resources[buffer_idx].data += blob
+            gltf.model.buffers[buffer_idx].byteLength += len(blob)
+    
+            # Buffer Views & Accessors
+            new_views_start = len(gltf.model.bufferViews)
+            gltf.model.bufferViews.extend([
+                BufferView(buffer=0, byteOffset=offset + t*4, byteLength=4*count*2, target=BufferTarget.ARRAY_BUFFER.value) 
+                for t in range(2)
+            ])
+    
+            new_accessors_start = len(gltf.model.accessors)
+            gltf.model.accessors.extend([
+                Accessor(
+                    bufferView=new_views_start + t, 
+                    componentType=ComponentType.FLOAT.value, 
+                    count=count, 
+                    type='VEC2', 
+                    max=[0.0 + t%2, 1.0 - t%2], 
+                    min=[0.0 + t%2, 1.0 - t%2]
+                ) for t in range(2)
+            ])
+    
+            primitive.targets = [Attributes(TEXCOORD_0=new_accessors_start + t) for t in range(2)]
+            mesh.weights = [0.0, 0.0]
+    
+            # Animation Data
+            anim_times = [0.0, duration]
+            anim_weights = [0.0, 0.0, dir_y, dir_x]
+    
+            offset_time = gltf.model.buffers[buffer_idx].byteLength
+            time_blob = struct.pack(f"{len(anim_times)}f", *anim_times)
+            gltf.resources[buffer_idx].data += time_blob
+            gltf.model.buffers[buffer_idx].byteLength += len(time_blob)
+    
+            offset_weights = gltf.model.buffers[buffer_idx].byteLength
+            weights_blob = struct.pack(f"{len(anim_weights)}f", *anim_weights)
+            gltf.resources[buffer_idx].data += weights_blob
+            gltf.model.buffers[buffer_idx].byteLength += len(weights_blob)
+    
+            bv_time_idx = len(gltf.model.bufferViews)
+            gltf.model.bufferViews.append(BufferView(buffer=0, byteOffset=offset_time, byteLength=len(time_blob)))
+            
+            bv_weights_idx = len(gltf.model.bufferViews)
+            gltf.model.bufferViews.append(BufferView(buffer=0, byteOffset=offset_weights, byteLength=len(weights_blob)))
+    
+            acc_time_idx = len(gltf.model.accessors)
+            gltf.model.accessors.append(Accessor(
+                bufferView=bv_time_idx, componentType=ComponentType.FLOAT.value, count=len(anim_times), 
+                type='SCALAR', max=[max(anim_times)], min=[0]
+            ))
+    
+            acc_weights_idx = len(gltf.model.accessors)
+            gltf.model.accessors.append(Accessor(
+                bufferView=bv_weights_idx, componentType=ComponentType.FLOAT.value, count=len(anim_weights), 
+                type='SCALAR', max=[max(anim_weights)], min=[min(anim_weights)]
+            ))
+    
+            if gltf.model.animations is None:
+                gltf.model.animations = []
+            
+            gltf.model.animations.append(
+                Animation(
+                    name='UV_Speed_Anim',
+                    channels=[Channel(sampler=0, target=Target(node=target_node_index, path='weights'))],
+                    samplers=[AnimationSampler(input=acc_time_idx, output=acc_weights_idx, interpolation='LINEAR')]
+                )
             )
-        )
 
         # Export using the specific output path provided by user
         gltf.export(output_file)
@@ -189,18 +196,13 @@ def load_nodes(filepath):
     except Exception as e:
         messagebox.showerror("Error", f"Could not read GLB file:\n{e}")
 
-def apply_animation():
+def add_animation():
     in_path = entry_input.get()
-    out_path = entry_output.get()
     node = combo_nodes.get()
     
     # GUI Validations
     if not in_path or not os.path.exists(in_path):
         messagebox.showwarning("Warning", "Please select a valid Input file.")
-        return
-
-    if not out_path:
-        messagebox.showwarning("Warning", "Please define an Output file.")
         return
 
     if not node or node == "No Mesh Found":
@@ -215,8 +217,55 @@ def apply_animation():
         messagebox.showerror("Error", "Speed, X, and Y must be numbers.")
         return
 
+    if float(entry_speed.get()) == 0:
+        messagebox.showerror("Error", "Speed cannot be zero.")
+        return
+
+    anim_data = [node, sp, x, y]
+    data.append(anim_data)
+    
+    # Update GUI queue
+    animation_queue_list.insert('end', anim_data)
+    animation_queue_list.pack(fill='y')
+
+def remove_animation():
+    # GUI Validation
+    if not animation_queue_list.curselection():
+        messagebox.showwarning("Warning", "Please select an animation on the queue to remove.")
+        return
+
+    selected = animation_queue_list.curselection()[0]
+    
+    # Data validation (should never happen, but just in case)
+    if selected > len(data):
+        messagebox.showerror("Error", "Could not remove animation.")
+        return
+        
+    data.pop(selected)
+    
+    # Update GUI queue
+    animation_queue_list.delete(selected)
+    animation_queue_list.pack(fill='y')
+
+def apply_animation():
+    in_path = entry_input.get()
+    out_path = entry_output.get()
+    
+    # GUI Validations
+    if not in_path or not os.path.exists(in_path):
+        messagebox.showwarning("Warning", "Please select a valid Input file.")
+        return
+
+    if not out_path:
+        messagebox.showwarning("Warning", "Please define an Output file.")
+        return
+
+    if len(data) == 0:
+        messagebox.showwarning("Warning", "Please add at least one animation to the animation queue.")
+        return
+
     # Call Logic
-    success, result = process_gltf(in_path, out_path, node, sp, x, y)
+    success, result = process_gltf(in_path, out_path)
     
     if success:
         messagebox.showinfo("Success!", f"File saved successfully at:\n{out_path}")
@@ -227,12 +276,26 @@ def apply_animation():
 
 root = tk.Tk()
 root.title("GLB UV Animator Tool")
-root.geometry("450x480") # Increased height for new fields
+root.geometry("540x480") # Increased width for the animation queue
 root.resizable(False, False)
 
+# Containers
+root_container = tk.Frame(root)
+root_container.pack(fill='x')
+
+core_container = tk.Frame(root_container, width=450)
+core_container.pack(side='left')
+
+# Operations Container
+animation_queue = tk.LabelFrame(root_container, width=180, text="Animation Queue", font=("Segoe UI", 9))
+animation_queue.pack(side='right', padx=15)
+
+animation_queue_list = tk.Listbox(animation_queue, height=18, width=50)
+animation_queue_list.pack(fill='y')
+
 # Input
-tk.Label(root, text="1. Input File (.GLB):", font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=15, pady=(15, 5))
-frame_input = tk.Frame(root)
+tk.Label(core_container, text="1. Input File (.GLB):", font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=15, pady=(15, 5))
+frame_input = tk.Frame(core_container)
 frame_input.pack(fill='x', padx=15, pady=0)
 
 entry_input = tk.Entry(frame_input)
@@ -241,12 +304,12 @@ btn_browse_in = tk.Button(frame_input, text="Browse...", command=select_input_fi
 btn_browse_in.pack(side='right', padx=(5, 0))
 
 # Node
-tk.Label(root, text="2. Target Mesh (Node):", font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=15, pady=(15, 5))
-combo_nodes = ttk.Combobox(root, state="readonly")
+tk.Label(core_container, text="2. Target Mesh (Node):", font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=15, pady=(15, 5))
+combo_nodes = ttk.Combobox(core_container, state="readonly")
 combo_nodes.pack(fill='x', padx=15, pady=0)
 
 # Settings
-frame_settings = tk.LabelFrame(root, text=" 3. Animation Settings ", font=("Segoe UI", 9))
+frame_settings = tk.LabelFrame(core_container, text=" 3. Animation Settings ", font=("Segoe UI", 9))
 frame_settings.pack(fill='x', padx=15, pady=(15, 0))
 
 tk.Label(frame_settings, text="Speed:").grid(row=0, column=0, sticky='e', padx=10, pady=10)
@@ -265,8 +328,8 @@ entry_y.insert(0, "0.0")
 entry_y.grid(row=2, column=1, sticky='w', padx=0, pady=10)
 
 # Output
-tk.Label(root, text="4. Output File:", font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=15, pady=(15, 5))
-frame_output = tk.Frame(root)
+tk.Label(core_container, text="4. Output File:", font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=15, pady=(15, 5))
+frame_output = tk.Frame(core_container)
 frame_output.pack(fill='x', padx=15, pady=0)
 
 entry_output = tk.Entry(frame_output)
@@ -274,14 +337,22 @@ entry_output.pack(side='left', fill='x', expand=True)
 btn_browse_out = tk.Button(frame_output, text="Save As...", command=select_output_file)
 btn_browse_out.pack(side='right', padx=(5, 0))
 
-# Apply
-btn_apply = tk.Button(root, text="Apply UV Anim", command=apply_animation, 
+# Add Animation button
+btn_add = tk.Button(animation_queue, text="Add to Queue", command=add_animation, font=("Segoe UI", 9))
+btn_add.pack(padx=15, pady=15, side='left')
+
+# Remove Animation button
+btn_add = tk.Button(animation_queue, text="Remove from Queue", command=remove_animation, font=("Segoe UI", 9))
+btn_add.pack(padx=15, pady=15, side='left')
+
+# Apply button
+btn_apply = tk.Button(root, text="Apply UV Animations", command=apply_animation, 
                       bg="#2e7d32", fg="white", font=("Segoe UI", 10, "bold"), height=2)
-btn_apply.pack(fill='x', padx=20, pady=25)
+btn_apply.pack(fill='x', padx=20, pady=20)
 
 # (Copyright)
 footer_text = "Rakíel © 2026"
 lbl_footer = tk.Label(root, text=footer_text, fg="gray", font=("Arial", 8))
-lbl_footer.pack(side="bottom", pady=10)
+lbl_footer.pack(side="bottom", pady=0)
 
 root.mainloop()
