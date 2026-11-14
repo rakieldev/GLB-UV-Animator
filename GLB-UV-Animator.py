@@ -6,6 +6,7 @@ from tkinter import filedialog, messagebox, ttk
 
 try:
     from uv_export import GLTF, UVAnimation, export_glb, has_weight_animation
+    from uv_preview import UVPreview
 except ModuleNotFoundError as exc:
     if exc.name != "gltflib":
         raise
@@ -60,13 +61,13 @@ class AnimatorApp:
         create_dark_theme(self.style)
         self.input_path = tk.StringVar()
         self.output_path = tk.StringVar()
-        self.speed = tk.StringVar(value="1.0")
+        self.speed = tk.StringVar(value="0.0")
         self.x = tk.StringVar(value="1.0")
         self.y = tk.StringVar(value="0.0")
 
         root.title("GLB UV Animator Tool")
         screen_width, screen_height = root.winfo_screenwidth(), root.winfo_screenheight()
-        width, height = min(760, screen_width), min(440, screen_height)
+        width, height = min(1120, screen_width), min(490, screen_height)
         left, top = (screen_width - width) // 2, (screen_height - height) // 2
         root.geometry(f"{width}x{height}+{left}+{top}")
         root.columnconfigure(0, weight=1)
@@ -77,6 +78,7 @@ class AnimatorApp:
         content.grid(sticky="nsew")
         content.columnconfigure(0, weight=1)
         content.columnconfigure(1, weight=1)
+        content.columnconfigure(2, weight=2)
         content.rowconfigure(0, weight=1)
 
         settings = ttk.Frame(content)
@@ -89,6 +91,7 @@ class AnimatorApp:
         ttk.Label(settings, text="Target Mesh (Node)").grid(row=1, sticky="w", pady=(12, 4))
         self.nodes = ttk.Combobox(settings, state="readonly", width=30)
         self.nodes.grid(row=2, sticky="ew")
+        self.nodes.bind("<<ComboboxSelected>>", self.preview_node)
 
         # Settings
         fields = ttk.LabelFrame(settings, text="Animation Settings", padding=8)
@@ -122,14 +125,19 @@ class AnimatorApp:
             row=1, column=1, sticky="ew", padx=(4, 0), pady=(8, 0),
         )
 
+        self.preview = UVPreview(content)
+        self.preview.grid(row=0, column=2, sticky="nsew", padx=(15, 0))
+        for variable in (self.speed, self.x, self.y):
+            variable.trace_add("write", self.preview_settings)
+
         # Apply button
         ttk.Button(content, text="Apply UV Animations", command=self.apply_animations).grid(
-            row=1, column=0, columnspan=2, sticky="ew", pady=(15, 8),
+            row=1, column=0, columnspan=3, sticky="ew", pady=(15, 8),
         )
         # (Copyright)
         ttk.Label(content, text="Rakíel © 2026").grid(row=2, column=0, sticky="w")
         appearance = ttk.Frame(content)
-        appearance.grid(row=2, column=1, sticky="e")
+        appearance.grid(row=2, column=2, sticky="e")
         ttk.Label(appearance, text="Theme").pack(side="left", padx=(0, 6))
         self.theme = ttk.Combobox(appearance, values=("Light", "Dark"), width=6, state="readonly")
         self.theme.current(0)
@@ -201,6 +209,29 @@ class AnimatorApp:
         else:
             self.nodes.set("")
             messagebox.showwarning("No Mesh", "This GLB has no nodes with meshes.", parent=self.root)
+        self.preview_node()
+
+    def preview_node(self, event=None):
+        selected = self.nodes.current()
+        index = self.node_indices[selected] if selected >= 0 else None
+        self.preview.show_node(self.source, index)
+
+    def read_animation(self, index):
+        try:
+            speed, x, y = (float(field.get()) for field in (self.speed, self.x, self.y))
+        except ValueError as exc:
+            raise ValueError("Speed, X, and Y must be numbers.") from exc
+        return UVAnimation(index, speed, x, y)
+
+    def preview_settings(self, *_):
+        selected = self.nodes.current()
+        if selected >= 0:
+            try:
+                entry = self.read_animation(self.node_indices[selected])
+            except ValueError as exc:
+                self.preview.invalid_settings(str(exc))
+            else:
+                self.preview.show_settings(entry)
 
     def node_label(self, index):
         node = self.source.model.nodes[index]
@@ -236,13 +267,7 @@ class AnimatorApp:
             return
         index = self.node_indices[selected]
         try:
-            speed, x, y = (float(field.get()) for field in (self.speed, self.x, self.y))
-        except ValueError:
-            messagebox.showerror("Error", "Speed, X, and Y must be numbers.", parent=self.root)
-            return
-
-        entry = UVAnimation(index, speed, x, y)
-        try:
+            entry = self.read_animation(index)
             entry.keyframes()
         except ValueError as exc:
             messagebox.showerror("Error", str(exc), parent=self.root)

@@ -1,1 +1,4 @@
 gltflib
+numpy
+Pillow
+moderngl
