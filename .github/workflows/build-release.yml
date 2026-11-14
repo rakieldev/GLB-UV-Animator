@@ -1,0 +1,62 @@
+name: Build release packages
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-2025
+            package: windows-x64
+          - runner: ubuntu-22.04
+            package: linux-x86_64
+          - runner: macos-15
+            package: macos-arm64
+    runs-on: ${{ matrix.runner }}
+    env:
+      PACKAGE: GLB-UV-Animator-v2.0.0-${{ matrix.package }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Install build dependencies
+        run: python -m pip install -r requirements.txt pyinstaller==6.22.3
+      - name: Run export tests
+        run: python -m unittest discover -s tests -v
+      - name: Build Windows archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          python -m PyInstaller --onedir --windowed --name GLB-UV-Animator --icon assets/app-icon.ico --add-data "assets/app-icon.png:assets" --collect-submodules glcontext GLB-UV-Animator.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $bundle = "dist/GLB-UV-Animator"
+          if (!(Test-Path -LiteralPath "$bundle/GLB-UV-Animator.exe" -PathType Leaf)) {
+            throw "Build did not produce GLB-UV-Animator.exe"
+          }
+          Copy-Item -LiteralPath LICENSE -Destination $bundle
+          Compress-Archive -LiteralPath $bundle -DestinationPath "$env:PACKAGE.zip"
+      - name: Build Linux archive
+        if: runner.os == 'Linux'
+        run: |
+          python -m PyInstaller --onedir --name GLB-UV-Animator --add-data "assets/app-icon.png:assets" --collect-submodules glcontext GLB-UV-Animator.py
+          test -x dist/GLB-UV-Animator/GLB-UV-Animator
+          cp LICENSE dist/GLB-UV-Animator/
+          tar -czf "$PACKAGE.tar.gz" -C dist GLB-UV-Animator
+      - name: Build macOS archive
+        if: runner.os == 'macOS'
+        run: |
+          python -m PyInstaller --onedir --windowed --name GLB-UV-Animator --icon assets/app-icon.png --add-data "assets/app-icon.png:assets" --add-data "LICENSE:." --collect-submodules glcontext GLB-UV-Animator.py
+          test -x dist/GLB-UV-Animator.app/Contents/MacOS/GLB-UV-Animator
+          ditto -c -k --keepParent dist/GLB-UV-Animator.app "$PACKAGE.zip"
+      - uses: actions/upload-artifact@v7
+        with:
+          path: ${{ env.PACKAGE }}.*
+          archive: false
+          if-no-files-found: error
