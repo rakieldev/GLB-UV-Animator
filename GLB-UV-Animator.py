@@ -1,4 +1,7 @@
+import os
+import sys
 import tkinter as tk
+import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -11,6 +14,26 @@ except ModuleNotFoundError as exc:
     if exc.name != "gltflib":
         raise
     GLTF = None
+
+
+def theme_preferences_path():
+    if sys.platform == "win32":
+        folder = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming")
+        return folder / "GLB UV Animator" / "theme.txt"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "GLB UV Animator" / "theme.txt"
+    folder = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    if not folder.is_absolute():
+        folder = Path.home() / ".config"
+    return folder / "glb-uv-animator" / "theme.txt"
+
+
+def load_theme(path):
+    try:
+        theme = path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        return "Light"
+    return "Dark" if theme == "Dark" else "Light"
 
 
 def create_dark_theme(style):
@@ -59,6 +82,7 @@ class AnimatorApp:
         self.light_theme = self.style.theme_use()
         self.style.configure("TButton", anchor="center")
         create_dark_theme(self.style)
+        self.theme_path = theme_preferences_path()
         self.input_path = tk.StringVar()
         self.output_path = tk.StringVar()
         self.speed = tk.StringVar(value="0.0")
@@ -66,6 +90,10 @@ class AnimatorApp:
         self.y = tk.StringVar(value="0.0")
 
         root.title("GLB UV Animator Tool")
+        icon_path = Path(__file__).resolve().parent / "assets" / "app-icon.png"
+        if icon_path.is_file():
+            icon = tk.PhotoImage(master=root, file=icon_path)
+            root.iconphoto(True, icon)
         screen_width, screen_height = root.winfo_screenwidth(), root.winfo_screenheight()
         width, height = min(1120, screen_width), min(490, screen_height)
         left, top = (screen_width - width) // 2, (screen_height - height) // 2
@@ -135,14 +163,17 @@ class AnimatorApp:
             row=1, column=0, columnspan=3, sticky="ew", pady=(15, 8),
         )
         # (Copyright)
-        ttk.Label(content, text="Rakíel © 2026").grid(row=2, column=0, sticky="w")
+        credit = ttk.Frame(content)
+        credit.grid(row=2, column=0, columnspan=2, sticky="w")
+        ttk.Label(credit, text="Rakíel © 2026").pack(side="left")
+        ttk.Button(credit, text="Support on Ko-fi", command=self.open_kofi).pack(side="left", padx=(8, 0))
         appearance = ttk.Frame(content)
         appearance.grid(row=2, column=2, sticky="e")
         ttk.Label(appearance, text="Theme").pack(side="left", padx=(0, 6))
         self.theme = ttk.Combobox(appearance, values=("Light", "Dark"), width=6, state="readonly")
-        self.theme.current(0)
+        self.theme.set(load_theme(self.theme_path))
         self.theme.pack(side="left")
-        self.theme.bind("<<ComboboxSelected>>", self.change_theme)
+        self.theme.bind("<<ComboboxSelected>>", self.save_theme)
         self.change_theme()
 
     # --- GUI Functions ---
@@ -154,7 +185,20 @@ class AnimatorApp:
         else:
             self.queue_scrollbar.grid(row=0, column=2, sticky="ns")
 
-    def change_theme(self, event=None):
+    def open_kofi(self):
+        url = "https://ko-fi.com/rakiel"
+        if not webbrowser.open(url):
+            messagebox.showinfo("Support on Ko-fi", url, parent=self.root)
+
+    def save_theme(self, event=None):
+        self.change_theme()
+        try:
+            self.theme_path.parent.mkdir(parents=True, exist_ok=True)
+            self.theme_path.write_text(self.theme.get() + "\n", encoding="utf-8")
+        except OSError as exc:
+            messagebox.showwarning("Theme", f"Could not save the theme preference.\n{exc}", parent=self.root)
+
+    def change_theme(self):
         self.style.theme_use("animator-dark" if self.theme.get() == "Dark" else self.light_theme)
         background = self.style.lookup("TFrame", "background")
         self.root.configure(background=background)

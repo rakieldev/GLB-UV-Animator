@@ -19,6 +19,7 @@ python GLB-UV-Animator.py
 6. Click "Apply Animations".
 
 # Notes:
+- The **Theme** selector remembers your Light or Dark preference across launches.
 - The UV Preview shows the selected mesh with its GLB node orientation. Left-drag to orbit, right-drag to pan, and use the mouse wheel or the zoom buttons to zoom. **Reset View** restores the camera, and **Show Saved** returns to the animation in the file after editing Speed/X/Y.
 - Speed starts at zero. Existing UV animations play when their node is selected. Enter a nonzero speed to preview and queue new settings.
 - The preview uses OpenGL 3.3 when available and falls back to CPU rendering. It displays embedded base-color textures on triangle meshes with simplified materials.
