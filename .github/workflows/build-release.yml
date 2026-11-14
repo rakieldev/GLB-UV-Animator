@@ -2,12 +2,39 @@ name: Build release packages
 
 on:
   workflow_dispatch:
+    inputs:
+      version:
+        description: Release tag (for example, v2.0.1)
+        required: true
+        type: string
+
+concurrency:
+  group: draft-release-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ inputs.version }}
 
 permissions:
   contents: read
 
 jobs:
+  validate-version:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Validate release version
+        run: |
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "Run this workflow from main."
+            exit 1
+          fi
+          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Enter a version such as v2.0.1."
+            exit 1
+          fi
+
   package:
+    needs: validate-version
     strategy:
       fail-fast: false
       matrix:
@@ -20,7 +47,7 @@ jobs:
             package: macos-arm64
     runs-on: ${{ matrix.runner }}
     env:
-      PACKAGE: GLB-UV-Animator-v2.0.0-${{ matrix.package }}
+      PACKAGE: GLB-UV-Animator-${{ inputs.version }}-${{ matrix.package }}
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-python@v6
@@ -60,3 +87,37 @@ jobs:
           path: ${{ env.PACKAGE }}.*
           archive: false
           if-no-files-found: error
+
+  draft-release:
+    needs: package
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: GLB-UV-Animator-${{ inputs.version }}-*
+          path: packages
+          merge-multiple: true
+          skip-decompress: true
+      - name: Tag the build and attach packages to a draft release
+        run: |
+          prefix="packages/GLB-UV-Animator-$RELEASE_TAG"
+          files=("$prefix-windows-x64.zip" "$prefix-linux-x86_64.tar.gz" "$prefix-macos-arm64.zip")
+          for file in "${files[@]}"; do
+            [[ -s "$file" ]] || { echo "Missing package: $file"; exit 1; }
+          done
+          if tag_sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/$RELEASE_TAG" --jq .sha 2>/dev/null); then
+            [[ "$tag_sha" == "$GITHUB_SHA" ]] || { echo "$RELEASE_TAG already points to a different commit. Choose a new version."; exit 1; }
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref="refs/tags/$RELEASE_TAG" -f sha="$GITHUB_SHA" --jq .ref
+          fi
+          if draft=$(gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null); then
+            [[ "$draft" == true ]] || { echo "$RELEASE_TAG is already published. Choose a new version."; exit 1; }
+            gh release upload "$RELEASE_TAG" "${files[@]}" --clobber -R "$GITHUB_REPOSITORY"
+          else
+            gh release create "$RELEASE_TAG" "${files[@]}" --draft --verify-tag --generate-notes -R "$GITHUB_REPOSITORY"
+          fi
