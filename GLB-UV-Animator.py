@@ -12,6 +12,39 @@ except ModuleNotFoundError as exc:
     GLTF = None
 
 
+def create_dark_theme(style):
+    background = "#202124"
+    field = "#292b30"
+    control = "#353840"
+    border = "#555a66"
+    text = "#f0f1f4"
+    accent = "#385a94"
+
+    style.theme_create("animator-dark", parent="clam", settings={
+        ".": {"configure": {
+            "background": background, "foreground": text, "fieldbackground": field,
+            "bordercolor": border, "lightcolor": control, "darkcolor": control,
+            "arrowcolor": text, "selectbackground": accent, "selectforeground": text,
+            "insertcolor": text,
+        }},
+        "TButton": {
+            "configure": {"background": control, "focuscolor": text, "anchor": "center"},
+            "map": {"background": [("pressed", accent), ("active", border)]},
+        },
+        "Vertical.TScrollbar": {
+            "configure": {"background": control, "troughcolor": field},
+            "map": {"background": [("active", border)]},
+        },
+        "TEntry": {"map": {
+            "fieldbackground": [("readonly", field)], "bordercolor": [("focus", accent)],
+        }},
+        "TCombobox": {"map": {
+            "fieldbackground": [("readonly", field)], "bordercolor": [("focus", accent)],
+            "background": [("active", border), ("readonly", control)],
+        }},
+    })
+
+
 class AnimatorApp:
     # --- GUI Layout ---
 
@@ -21,6 +54,10 @@ class AnimatorApp:
         self.source_path = None
         self.node_indices = []
         self.queue = {}
+        self.style = ttk.Style(root)
+        self.light_theme = self.style.theme_use()
+        self.style.configure("TButton", anchor="center")
+        create_dark_theme(self.style)
         self.input_path = tk.StringVar()
         self.output_path = tk.StringVar()
         self.speed = tk.StringVar(value="1.0")
@@ -28,6 +65,10 @@ class AnimatorApp:
         self.y = tk.StringVar(value="0.0")
 
         root.title("GLB UV Animator Tool")
+        screen_width, screen_height = root.winfo_screenwidth(), root.winfo_screenheight()
+        width, height = min(760, screen_width), min(440, screen_height)
+        left, top = (screen_width - width) // 2, (screen_height - height) // 2
+        root.geometry(f"{width}x{height}+{left}+{top}")
         root.columnconfigure(0, weight=1)
         root.rowconfigure(0, weight=1)
 
@@ -66,20 +107,19 @@ class AnimatorApp:
         # Operations Container
         queue_panel = ttk.LabelFrame(content, text="Animation Queue", padding=8)
         queue_panel.grid(row=0, column=1, sticky="nsew")
-        queue_panel.columnconfigure(0, weight=1)
+        queue_panel.columnconfigure((0, 1), weight=1, uniform="queue-actions")
         queue_panel.rowconfigure(0, weight=1)
         self.queue_list = tk.Listbox(queue_panel, width=37, height=12)
         self.queue_list.grid(row=0, column=0, columnspan=2, sticky="nsew")
-        scrollbar = ttk.Scrollbar(queue_panel, command=self.queue_list.yview)
-        scrollbar.grid(row=0, column=2, sticky="ns")
-        self.queue_list.configure(yscrollcommand=scrollbar.set)
+        self.queue_scrollbar = ttk.Scrollbar(queue_panel, command=self.queue_list.yview)
+        self.queue_list.configure(yscrollcommand=self.update_queue_scrollbar)
         # Add Animation button
         ttk.Button(queue_panel, text="Add to Queue", command=self.add_animation).grid(
-            row=1, column=0, sticky="ew", pady=(8, 0),
+            row=1, column=0, sticky="ew", padx=(0, 4), pady=(8, 0),
         )
         # Remove Animation button
         ttk.Button(queue_panel, text="Remove", command=self.remove_animation).grid(
-            row=1, column=1, sticky="ew", padx=(8, 0), pady=(8, 0),
+            row=1, column=1, sticky="ew", padx=(4, 0), pady=(8, 0),
         )
 
         # Apply button
@@ -87,9 +127,37 @@ class AnimatorApp:
             row=1, column=0, columnspan=2, sticky="ew", pady=(15, 8),
         )
         # (Copyright)
-        ttk.Label(content, text="Rakíel © 2026").grid(row=2, column=0, columnspan=2)
+        ttk.Label(content, text="Rakíel © 2026").grid(row=2, column=0, sticky="w")
+        appearance = ttk.Frame(content)
+        appearance.grid(row=2, column=1, sticky="e")
+        ttk.Label(appearance, text="Theme").pack(side="left", padx=(0, 6))
+        self.theme = ttk.Combobox(appearance, values=("Light", "Dark"), width=6, state="readonly")
+        self.theme.current(0)
+        self.theme.pack(side="left")
+        self.theme.bind("<<ComboboxSelected>>", self.change_theme)
+        self.change_theme()
 
     # --- GUI Functions ---
+
+    def update_queue_scrollbar(self, first, last):
+        self.queue_scrollbar.set(first, last)
+        if float(first) == 0 and float(last) == 1:
+            self.queue_scrollbar.grid_remove()
+        else:
+            self.queue_scrollbar.grid(row=0, column=2, sticky="ns")
+
+    def change_theme(self, event=None):
+        self.style.theme_use("animator-dark" if self.theme.get() == "Dark" else self.light_theme)
+        background = self.style.lookup("TFrame", "background")
+        self.root.configure(background=background)
+        colors = {
+            "background": self.style.lookup("TEntry", "fieldbackground") or self.root.cget("background"),
+            "foreground": self.style.lookup(".", "foreground"),
+            "selectbackground": self.style.lookup(".", "selectbackground"),
+            "selectforeground": self.style.lookup(".", "selectforeground"),
+            "highlightbackground": background,
+        }
+        self.queue_list.configure(**{key: value for key, value in colors.items() if value})
 
     def path_field(self, parent, row, label, variable, button, command, readonly=False):
         frame = ttk.Frame(parent)
