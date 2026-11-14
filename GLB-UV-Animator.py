@@ -1,358 +1,233 @@
 import tkinter as tk
+from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-import struct
-import os
-import sys
 
 # --- Setup & imports ---
 
 try:
-    from gltflib import (
-        GLTF, BufferView, Accessor, BufferTarget, Animation, Channel, 
-        AnimationSampler, Target, ComponentType, Attributes
-    )
-except ImportError:
-    root = tk.Tk()
-    root.withdraw()
-    messagebox.showerror("Error", "Library 'gltflib' not found.\nPlease run: pip install gltflib")
-    sys.exit(1)
+    from uv_export import GLTF, UVAnimation, export_glb, has_weight_animation
+except ModuleNotFoundError as exc:
+    if exc.name != "gltflib":
+        raise
+    GLTF = None
 
-# --- Core Logic ---
-data = []
 
-def process_gltf(input_file, output_file):
-    try:
-        gltf = GLTF.load(input_file)
-        
-        for x in data:
-            node_name = x[0]
-            speed = x[1]
-            x_dir = x[2]
-            y_dir = x[3]
-            
-            # Validation (should never happen, but just in case)
-            if speed == 0:
-                return False, "Speed cannot be zero."
-    
-            duration = 1.0 / abs(speed)
-            dir_x = x_dir * (1 if speed > 0 else -1)
-            dir_y = y_dir * (1 if speed > 0 else -1)
-    
-            # Find Node
-            target_node_index = -1
-            for i, node in enumerate(gltf.model.nodes):
-                if node.name and node.name.strip().lower() == node_name.strip().lower():
-                    target_node_index = i
-                    break
-            
-            if target_node_index == -1:
-                return False, f"Node '{node_name}' not found."
-    
-            target_node = gltf.model.nodes[target_node_index]
-            if target_node.mesh is None:
-                return False, "Selected node has no mesh."
-    
-            target_node.weights = [0.0, 0.0]
-    
-            # Prepare Morph Targets
-            mesh = gltf.model.meshes[target_node.mesh]
-            primitive = mesh.primitives[0]
-            
-            uv_accessor = gltf.model.accessors[primitive.attributes.TEXCOORD_0]
-            count = uv_accessor.count
-            buffer_idx = 0 
-    
-            if not gltf.model.buffers:
-                return False, "Model has no buffers."
-            
-            offset = gltf.model.buffers[buffer_idx].byteLength
-            
-            # Binary Injection
-            blob = struct.pack("".join(['f' for _ in range(count*2+1)]),*[t%2 for t in range(count*2+1)])
-            gltf.resources[buffer_idx].data += blob
-            gltf.model.buffers[buffer_idx].byteLength += len(blob)
-    
-            # Buffer Views & Accessors
-            new_views_start = len(gltf.model.bufferViews)
-            gltf.model.bufferViews.extend([
-                BufferView(buffer=0, byteOffset=offset + t*4, byteLength=4*count*2, target=BufferTarget.ARRAY_BUFFER.value) 
-                for t in range(2)
-            ])
-    
-            new_accessors_start = len(gltf.model.accessors)
-            gltf.model.accessors.extend([
-                Accessor(
-                    bufferView=new_views_start + t, 
-                    componentType=ComponentType.FLOAT.value, 
-                    count=count, 
-                    type='VEC2', 
-                    max=[0.0 + t%2, 1.0 - t%2], 
-                    min=[0.0 + t%2, 1.0 - t%2]
-                ) for t in range(2)
-            ])
-    
-            primitive.targets = [Attributes(TEXCOORD_0=new_accessors_start + t) for t in range(2)]
-            mesh.weights = [0.0, 0.0]
-    
-            # Animation Data
-            anim_times = [0.0, duration]
-            anim_weights = [0.0, 0.0, dir_y, dir_x]
-    
-            offset_time = gltf.model.buffers[buffer_idx].byteLength
-            time_blob = struct.pack(f"{len(anim_times)}f", *anim_times)
-            gltf.resources[buffer_idx].data += time_blob
-            gltf.model.buffers[buffer_idx].byteLength += len(time_blob)
-    
-            offset_weights = gltf.model.buffers[buffer_idx].byteLength
-            weights_blob = struct.pack(f"{len(anim_weights)}f", *anim_weights)
-            gltf.resources[buffer_idx].data += weights_blob
-            gltf.model.buffers[buffer_idx].byteLength += len(weights_blob)
-    
-            bv_time_idx = len(gltf.model.bufferViews)
-            gltf.model.bufferViews.append(BufferView(buffer=0, byteOffset=offset_time, byteLength=len(time_blob)))
-            
-            bv_weights_idx = len(gltf.model.bufferViews)
-            gltf.model.bufferViews.append(BufferView(buffer=0, byteOffset=offset_weights, byteLength=len(weights_blob)))
-    
-            acc_time_idx = len(gltf.model.accessors)
-            gltf.model.accessors.append(Accessor(
-                bufferView=bv_time_idx, componentType=ComponentType.FLOAT.value, count=len(anim_times), 
-                type='SCALAR', max=[max(anim_times)], min=[0]
-            ))
-    
-            acc_weights_idx = len(gltf.model.accessors)
-            gltf.model.accessors.append(Accessor(
-                bufferView=bv_weights_idx, componentType=ComponentType.FLOAT.value, count=len(anim_weights), 
-                type='SCALAR', max=[max(anim_weights)], min=[min(anim_weights)]
-            ))
-    
-            if gltf.model.animations is None:
-                gltf.model.animations = []
-            
-            gltf.model.animations.append(
-                Animation(
-                    name='UV_Speed_Anim',
-                    channels=[Channel(sampler=0, target=Target(node=target_node_index, path='weights'))],
-                    samplers=[AnimationSampler(input=acc_time_idx, output=acc_weights_idx, interpolation='LINEAR')]
-                )
+class AnimatorApp:
+    # --- GUI Layout ---
+
+    def __init__(self, root):
+        self.root = root
+        self.source = None
+        self.source_path = None
+        self.node_indices = []
+        self.queue = {}
+        self.input_path = tk.StringVar()
+        self.output_path = tk.StringVar()
+        self.speed = tk.StringVar(value="1.0")
+        self.x = tk.StringVar(value="1.0")
+        self.y = tk.StringVar(value="0.0")
+
+        root.title("GLB UV Animator Tool")
+        root.columnconfigure(0, weight=1)
+        root.rowconfigure(0, weight=1)
+
+        # Containers
+        content = ttk.Frame(root, padding=15)
+        content.grid(sticky="nsew")
+        content.columnconfigure(0, weight=1)
+        content.columnconfigure(1, weight=1)
+        content.rowconfigure(0, weight=1)
+
+        settings = ttk.Frame(content)
+        settings.grid(row=0, column=0, sticky="new", padx=(0, 15))
+        settings.columnconfigure(0, weight=1)
+        # Input
+        self.path_field(settings, 0, "Input File (.GLB)", self.input_path, "Browse...", self.open_model, True)
+
+        # Node
+        ttk.Label(settings, text="Target Mesh (Node)").grid(row=1, sticky="w", pady=(12, 4))
+        self.nodes = ttk.Combobox(settings, state="readonly", width=30)
+        self.nodes.grid(row=2, sticky="ew")
+
+        # Settings
+        fields = ttk.LabelFrame(settings, text="Animation Settings", padding=8)
+        fields.grid(row=3, sticky="ew", pady=12)
+        for row, (label, variable) in enumerate((
+            ("Speed", self.speed),
+            ("X Direction (-1 to 1)", self.x),
+            ("Y Direction (-1 to 1)", self.y),
+        )):
+            ttk.Label(fields, text=label).grid(row=row, column=0, sticky="w", padx=(0, 10), pady=3)
+            ttk.Entry(fields, width=10, textvariable=variable).grid(row=row, column=1, pady=3)
+
+        # Output
+        self.path_field(settings, 4, "Output File", self.output_path, "Save As...", self.choose_output)
+
+        # Operations Container
+        queue_panel = ttk.LabelFrame(content, text="Animation Queue", padding=8)
+        queue_panel.grid(row=0, column=1, sticky="nsew")
+        queue_panel.columnconfigure(0, weight=1)
+        queue_panel.rowconfigure(0, weight=1)
+        self.queue_list = tk.Listbox(queue_panel, width=37, height=12)
+        self.queue_list.grid(row=0, column=0, columnspan=2, sticky="nsew")
+        scrollbar = ttk.Scrollbar(queue_panel, command=self.queue_list.yview)
+        scrollbar.grid(row=0, column=2, sticky="ns")
+        self.queue_list.configure(yscrollcommand=scrollbar.set)
+        # Add Animation button
+        ttk.Button(queue_panel, text="Add to Queue", command=self.add_animation).grid(
+            row=1, column=0, sticky="ew", pady=(8, 0),
+        )
+        # Remove Animation button
+        ttk.Button(queue_panel, text="Remove", command=self.remove_animation).grid(
+            row=1, column=1, sticky="ew", padx=(8, 0), pady=(8, 0),
+        )
+
+        # Apply button
+        ttk.Button(content, text="Apply UV Animations", command=self.apply_animations).grid(
+            row=1, column=0, columnspan=2, sticky="ew", pady=(15, 8),
+        )
+        # (Copyright)
+        ttk.Label(content, text="Rakíel © 2026").grid(row=2, column=0, columnspan=2)
+
+    # --- GUI Functions ---
+
+    def path_field(self, parent, row, label, variable, button, command, readonly=False):
+        frame = ttk.Frame(parent)
+        frame.grid(row=row, sticky="ew")
+        frame.columnconfigure(0, weight=1)
+        ttk.Label(frame, text=label).grid(row=0, column=0, sticky="w", pady=(0, 4))
+        ttk.Entry(frame, textvariable=variable, state="readonly" if readonly else "normal").grid(
+            row=1, column=0, sticky="ew",
+        )
+        ttk.Button(frame, text=button, command=command).grid(row=1, column=1, padx=(5, 0))
+
+    def open_model(self):
+        filename = filedialog.askopenfilename(parent=self.root, filetypes=[("GLB Files", "*.glb")])
+        if not filename:
+            return
+        path = Path(filename)
+        try:
+            source = GLTF.load_glb(str(path))
+        except Exception as exc:
+            messagebox.showerror("Error", f"Could not read GLB file:\n{exc}", parent=self.root)
+            return
+
+        self.source = source
+        self.source_path = path
+        self.input_path.set(str(path))
+        # Auto-fill output path
+        # Suggests: out_original_name.glb in same folder
+        self.output_path.set(str(path.with_name(f"out_{path.name}")))
+        self.queue.clear()
+        self.refresh_queue()
+
+        self.node_indices = [
+            index for index, node in enumerate(source.model.nodes or []) if node.mesh is not None
+        ]
+        self.nodes["values"] = [
+            self.node_label(index) + (" (animated weights)" if self.has_weight_animation(index) else "")
+            for index in self.node_indices
+        ]
+        if self.node_indices:
+            self.nodes.current(0)
+        else:
+            self.nodes.set("")
+            messagebox.showwarning("No Mesh", "This GLB has no nodes with meshes.", parent=self.root)
+
+    def node_label(self, index):
+        node = self.source.model.nodes[index]
+        return f"{node.name or 'Unnamed node'} [#{index}]"
+
+    def has_weight_animation(self, index):
+        model = self.source.model
+        return has_weight_animation(model.animations or [], index, model.nodes[index].mesh)
+
+    def choose_output(self):
+        # Start browsing from the input file directory
+        filename = filedialog.asksaveasfilename(
+            parent=self.root,
+            initialdir=self.source_path.parent if self.source_path else Path.home(),
+            defaultextension=".glb",
+            filetypes=[("GLB Files", "*.glb")],
+        )
+        if filename:
+            self.output_path.set(filename)
+
+    def refresh_queue(self):
+        # Update GUI queue
+        self.queue_list.delete(0, tk.END)
+        for entry in self.queue.values():
+            self.queue_list.insert(
+                tk.END, f"{self.node_label(entry.node_index)}  |  {entry.speed:g} / {entry.x:g}, {entry.y:g}",
             )
 
-        # Export using the specific output path provided by user
-        gltf.export(output_file)
-        return True, "Done"
+    def add_animation(self):
+        selected = self.nodes.current()
+        if selected < 0:
+            messagebox.showwarning("Target Mesh", "Open a GLB and select a mesh.", parent=self.root)
+            return
+        index = self.node_indices[selected]
+        try:
+            speed, x, y = (float(field.get()) for field in (self.speed, self.x, self.y))
+        except ValueError:
+            messagebox.showerror("Error", "Speed, X, and Y must be numbers.", parent=self.root)
+            return
 
-    except Exception as e:
-        return False, str(e)
+        entry = UVAnimation(index, speed, x, y)
+        try:
+            entry.keyframes()
+        except ValueError as exc:
+            messagebox.showerror("Error", str(exc), parent=self.root)
+            return
+        if index in self.queue:
+            messagebox.showwarning(
+                "Animation Queue", "This node is already queued. Remove its entry to change the settings.",
+                parent=self.root,
+            )
+            return
+        self.queue[index] = entry
+        self.refresh_queue()
 
-# --- GUI Functions ---
+    def remove_animation(self):
+        selected = self.queue_list.curselection()
+        if not selected:
+            messagebox.showwarning("Animation Queue", "Select an animation to remove.", parent=self.root)
+            return
+        index = tuple(self.queue)[selected[0]]
+        del self.queue[index]
+        self.refresh_queue()
 
-def select_input_file():
-    filename = filedialog.askopenfilename(filetypes=[("GLB Files", "*.glb")])
-    if filename:
-        filename = os.path.normpath(filename)
-        entry_input.delete(0, tk.END)
-        entry_input.insert(0, filename)
-        
-        # Auto-fill output path
-        directory = os.path.dirname(filename)
-        basename = os.path.basename(filename)
-        name_part, ext_part = os.path.splitext(basename)
-        # Suggests: out_original_name.glb in same folder
-        suggested_output = os.path.join(directory, f"out_{name_part}{ext_part}")
-        
-        entry_output.delete(0, tk.END)
-        entry_output.insert(0, suggested_output)
-        
-        load_nodes(filename)
+    def apply_animations(self):
+        if self.source is None or not self.queue:
+            messagebox.showwarning("Animation Queue", "Open a GLB and queue an animation.", parent=self.root)
+            return
+        filename = self.output_path.get().strip()
+        if not filename:
+            messagebox.showwarning("Output File", "Choose an output file.", parent=self.root)
+            return
 
-def select_output_file():
-    # Start browsing from the input file directory
-    current_input = entry_input.get()
-    initial_dir = os.path.dirname(current_input) if current_input else "/"
-    
-    filename = filedialog.asksaveasfilename(
-        initialdir=initial_dir,
-        defaultextension=".glb",
-        filetypes=[("GLB Files", "*.glb")]
-    )
-    if filename:
-        filename = os.path.normpath(filename)
-        entry_output.delete(0, tk.END)
-        entry_output.insert(0, filename)
+        try:
+            export_glb(self.source, filename, self.queue.values())
+        except Exception as exc:
+            messagebox.showerror("Processing Error", str(exc), parent=self.root)
+        else:
+            messagebox.showinfo("Success", f"File saved at:\n{filename}", parent=self.root)
 
-def load_nodes(filepath):
-    try:
-        gltf = GLTF.load(filepath)
-        node_names = []
-        for node in gltf.model.nodes:
-            if node.name and node.mesh is not None:
-                node_names.append(node.name)
-        
-        if not node_names:
-            node_names = ["No Mesh Found"]
-        
-        combo_nodes['values'] = node_names
-        combo_nodes.current(0)
-    except Exception as e:
-        messagebox.showerror("Error", f"Could not read GLB file:\n{e}")
 
-def add_animation():
-    in_path = entry_input.get()
-    node = combo_nodes.get()
-    
-    # GUI Validations
-    if not in_path or not os.path.exists(in_path):
-        messagebox.showwarning("Warning", "Please select a valid Input file.")
-        return
+def main():
+    root = tk.Tk()
+    if GLTF is None:
+        root.withdraw()
+        messagebox.showerror(
+            "Error", "Library 'gltflib' not found.\nPlease run: python -m pip install -r requirements.txt",
+            parent=root,
+        )
+        root.destroy()
+        return 1
+    AnimatorApp(root)
+    root.mainloop()
+    return 0
 
-    if not node or node == "No Mesh Found":
-        messagebox.showwarning("Warning", "Please select a valid Target Mesh.")
-        return
 
-    try:
-        sp = float(entry_speed.get())
-        x = float(entry_x.get())
-        y = float(entry_y.get())
-    except ValueError:
-        messagebox.showerror("Error", "Speed, X, and Y must be numbers.")
-        return
-
-    if float(entry_speed.get()) == 0:
-        messagebox.showerror("Error", "Speed cannot be zero.")
-        return
-
-    anim_data = [node, sp, x, y]
-    data.append(anim_data)
-    
-    # Update GUI queue
-    animation_queue_list.insert('end', anim_data)
-    animation_queue_list.pack(fill='y')
-
-def remove_animation():
-    # GUI Validation
-    if not animation_queue_list.curselection():
-        messagebox.showwarning("Warning", "Please select an animation on the queue to remove.")
-        return
-
-    selected = animation_queue_list.curselection()[0]
-    
-    # Data validation (should never happen, but just in case)
-    if selected > len(data):
-        messagebox.showerror("Error", "Could not remove animation.")
-        return
-        
-    data.pop(selected)
-    
-    # Update GUI queue
-    animation_queue_list.delete(selected)
-    animation_queue_list.pack(fill='y')
-
-def apply_animation():
-    in_path = entry_input.get()
-    out_path = entry_output.get()
-    
-    # GUI Validations
-    if not in_path or not os.path.exists(in_path):
-        messagebox.showwarning("Warning", "Please select a valid Input file.")
-        return
-
-    if not out_path:
-        messagebox.showwarning("Warning", "Please define an Output file.")
-        return
-
-    if len(data) == 0:
-        messagebox.showwarning("Warning", "Please add at least one animation to the animation queue.")
-        return
-
-    # Call Logic
-    success, result = process_gltf(in_path, out_path)
-    
-    if success:
-        messagebox.showinfo("Success!", f"File saved successfully at:\n{out_path}")
-    else:
-        messagebox.showerror("Processing Error", result)
-
-# --- GUI Layout (No shortcut styling to avoid crashes) ---
-
-root = tk.Tk()
-root.title("GLB UV Animator Tool")
-root.geometry("540x480") # Increased width for the animation queue
-root.resizable(False, False)
-
-# Containers
-root_container = tk.Frame(root)
-root_container.pack(fill='x')
-
-core_container = tk.Frame(root_container, width=450)
-core_container.pack(side='left')
-
-# Operations Container
-animation_queue = tk.LabelFrame(root_container, width=180, text="Animation Queue", font=("Segoe UI", 9))
-animation_queue.pack(side='right', padx=15)
-
-animation_queue_list = tk.Listbox(animation_queue, height=18, width=50)
-animation_queue_list.pack(fill='y')
-
-# Input
-tk.Label(core_container, text="1. Input File (.GLB):", font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=15, pady=(15, 5))
-frame_input = tk.Frame(core_container)
-frame_input.pack(fill='x', padx=15, pady=0)
-
-entry_input = tk.Entry(frame_input)
-entry_input.pack(side='left', fill='x', expand=True)
-btn_browse_in = tk.Button(frame_input, text="Browse...", command=select_input_file)
-btn_browse_in.pack(side='right', padx=(5, 0))
-
-# Node
-tk.Label(core_container, text="2. Target Mesh (Node):", font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=15, pady=(15, 5))
-combo_nodes = ttk.Combobox(core_container, state="readonly")
-combo_nodes.pack(fill='x', padx=15, pady=0)
-
-# Settings
-frame_settings = tk.LabelFrame(core_container, text=" 3. Animation Settings ", font=("Segoe UI", 9))
-frame_settings.pack(fill='x', padx=15, pady=(15, 0))
-
-tk.Label(frame_settings, text="Speed:").grid(row=0, column=0, sticky='e', padx=10, pady=10)
-entry_speed = tk.Entry(frame_settings, width=10)
-entry_speed.insert(0, "1.0")
-entry_speed.grid(row=0, column=1, sticky='w', padx=0, pady=10)
-
-tk.Label(frame_settings, text="X Direction (-1 to 1):").grid(row=1, column=0, sticky='e', padx=10, pady=5)
-entry_x = tk.Entry(frame_settings, width=10)
-entry_x.insert(0, "1.0")
-entry_x.grid(row=1, column=1, sticky='w', padx=0, pady=5)
-
-tk.Label(frame_settings, text="Y Direction (-1 to 1):").grid(row=2, column=0, sticky='e', padx=10, pady=10)
-entry_y = tk.Entry(frame_settings, width=10)
-entry_y.insert(0, "0.0")
-entry_y.grid(row=2, column=1, sticky='w', padx=0, pady=10)
-
-# Output
-tk.Label(core_container, text="4. Output File:", font=("Segoe UI", 9, "bold")).pack(anchor="w", padx=15, pady=(15, 5))
-frame_output = tk.Frame(core_container)
-frame_output.pack(fill='x', padx=15, pady=0)
-
-entry_output = tk.Entry(frame_output)
-entry_output.pack(side='left', fill='x', expand=True)
-btn_browse_out = tk.Button(frame_output, text="Save As...", command=select_output_file)
-btn_browse_out.pack(side='right', padx=(5, 0))
-
-# Add Animation button
-btn_add = tk.Button(animation_queue, text="Add to Queue", command=add_animation, font=("Segoe UI", 9))
-btn_add.pack(padx=15, pady=15, side='left')
-
-# Remove Animation button
-btn_add = tk.Button(animation_queue, text="Remove from Queue", command=remove_animation, font=("Segoe UI", 9))
-btn_add.pack(padx=15, pady=15, side='left')
-
-# Apply button
-btn_apply = tk.Button(root, text="Apply UV Animations", command=apply_animation, 
-                      bg="#2e7d32", fg="white", font=("Segoe UI", 10, "bold"), height=2)
-btn_apply.pack(fill='x', padx=20, pady=20)
-
-# (Copyright)
-footer_text = "Rakíel © 2026"
-lbl_footer = tk.Label(root, text=footer_text, fg="gray", font=("Arial", 8))
-lbl_footer.pack(side="bottom", pady=0)
-
-root.mainloop()
+if __name__ == "__main__":
+    raise SystemExit(main())
